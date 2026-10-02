@@ -1,0 +1,457 @@
+/*
+ * TrackView — keyframes and phase-driven visibility.
+ * The rAF loop in TrackView.tsx only toggles `data-phase` on `.tv-root` and the `tv-on` class on
+ * one-shot effects; everything else is plain CSS. Colors come from the design tokens in index.css
+ * (the fallbacks are just the token values, in case a variable is tree-shaken from the bundle).
+ *
+ * SVG note: the track SVG uses grid units, so SVG-side CSS transforms only use unitless
+ * functions (scale / rotate); pixel translations are done in the HTML overlay.
+ */
+
+.tv-root {
+  --tv-gap: 12px;
+  --tv-ok: var(--color-ok, #22c55e);
+  --tv-bad: var(--color-bad, #f43f5e);
+  --tv-warn: var(--color-warn, #f59e0b);
+  --tv-info: var(--color-info, #38bdf8);
+  --tv-panel: var(--color-panel, #111723);
+  --tv-ink: var(--color-ink, #e7ecf5);
+  --tv-ink-dim: var(--color-ink-dim, #93a0b8);
+  --tv-surface: var(--color-surface, #0a0e15);
+  --tv-line: var(--color-line, #253046);
+}
+
+/* ───────────── SVG effects (hidden unless the phase asks for them) ───────────── */
+
+.tv-root :is(.tv-think-ring, .tv-think-ring-static, .tv-crash-glow, .tv-finish-ring, .tv-smoke, .tv-damage) {
+  display: none;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.tv-root[data-phase='thinking'] .tv-think-ring-static {
+  display: inline;
+  stroke-opacity: 0.4;
+}
+.tv-root[data-phase='thinking'] .tv-think-ring {
+  display: inline;
+  animation: tv-ring 1.3s ease-out infinite;
+}
+
+.tv-root[data-phase='crashed'] .tv-crash-glow {
+  display: inline;
+  animation: tv-glow 0.32s ease-in-out infinite alternate;
+}
+.tv-root[data-phase='crashed'] .tv-damage {
+  display: inline;
+  animation: tv-damage 0.32s ease-in-out infinite alternate;
+}
+
+.tv-root[data-phase='finished'] .tv-finish-ring {
+  display: inline;
+  animation: tv-finish 2.4s linear infinite;
+}
+
+.tv-root[data-phase='spinning'] .tv-smoke {
+  display: inline;
+  animation: tv-smoke 0.7s ease-out infinite;
+}
+.tv-root[data-phase='spinning'] .tv-smoke-2 {
+  animation-delay: 0.23s;
+}
+.tv-root[data-phase='spinning'] .tv-smoke-3 {
+  animation-delay: 0.46s;
+}
+
+/* Trail: visible while driving, melts away while the car waits for a decision */
+.tv-trail {
+  opacity: 0;
+  transition: opacity 0.9s ease-out;
+}
+.tv-root[data-phase='moving'] .tv-trail,
+.tv-root[data-phase='spinning'] .tv-trail {
+  opacity: 1;
+  transition-duration: 0.15s;
+}
+
+/* One-shot effects, restarted by adding `tv-on` */
+.tv-burst,
+.tv-skid {
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.tv-burst.tv-on {
+  animation: tv-burst 0.75s ease-out both;
+}
+.tv-skid.tv-on {
+  animation: tv-skid 2.6s ease-out both;
+}
+
+/* Hazards: fade/scale in when a lap regenerates them */
+.tv-hazard {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.tv-oil {
+  animation: tv-oil-in 0.8s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+}
+.tv-cones {
+  animation: tv-cones-in 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.2) both;
+}
+
+/* ───────────── HTML overlays ───────────── */
+
+.tv-flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  box-shadow: inset 0 0 0 3px var(--tv-bad), inset 0 0 70px 6px color-mix(in srgb, var(--tv-bad) 55%, transparent);
+  background: radial-gradient(ellipse at center, color-mix(in srgb, var(--tv-bad) 16%, transparent), transparent 70%);
+}
+.tv-flash.tv-on {
+  animation: tv-flash 0.7s ease-out both;
+}
+
+/* The anchor sits exactly on the car; children are placed relative to it. */
+.tv-anchor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.tv-pop {
+  position: absolute;
+  left: 0;
+  bottom: var(--tv-gap);
+  translate: calc(-50% + var(--tv-shift, 0px)) 0;
+  white-space: nowrap;
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--tv-line);
+  background: color-mix(in srgb, var(--tv-panel) 94%, transparent);
+  color: var(--tv-ink);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.4);
+}
+.tv-anchor[data-flip='1'] .tv-pop {
+  bottom: auto;
+  top: var(--tv-gap);
+}
+
+.tv-pop::after {
+  /* little tail pointing at the car */
+  content: '';
+  position: absolute;
+  left: calc(50% - var(--tv-shift, 0px));
+  bottom: -4px;
+  width: 7px;
+  height: 7px;
+  margin-left: -3.5px;
+  rotate: 45deg;
+  background: inherit;
+  border-right: 1px solid var(--tv-line);
+  border-bottom: 1px solid var(--tv-line);
+  border-color: inherit;
+  border-top-color: transparent;
+  border-left-color: transparent;
+}
+.tv-anchor[data-flip='1'] .tv-pop::after {
+  bottom: auto;
+  top: -4px;
+  rotate: 225deg;
+}
+
+.tv-root[data-phase='thinking'] .tv-bubble {
+  display: flex;
+  animation: tv-pop-in 0.18s ease-out both;
+}
+.tv-root[data-phase='finished'] .tv-flag {
+  display: flex;
+  animation: tv-pop-in 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+  border-color: var(--tv-warn);
+}
+
+.tv-timer {
+  min-width: 4.3em;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.tv-dots {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+.tv-dots i {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--tv-ink);
+  animation: tv-dot 1.1s ease-in-out infinite;
+}
+.tv-dots i:nth-child(2) {
+  animation-delay: 0.16s;
+}
+.tv-dots i:nth-child(3) {
+  animation-delay: 0.32s;
+}
+
+.tv-checker {
+  width: 14px;
+  height: 14px;
+  border-radius: 2px;
+  background: repeating-conic-gradient(var(--tv-surface) 0% 25%, #fff 0% 50%) 0 0 / 7px 7px;
+  box-shadow: 0 0 0 1px var(--tv-line);
+}
+
+/* Decision marker: ✓ / ✗ / ≈ */
+.tv-marker-pos {
+  position: absolute;
+  left: var(--tv-gap);
+  top: 0;
+  translate: 0 -50%;
+}
+.tv-anchor[data-side='l'] .tv-marker-pos {
+  left: auto;
+  right: var(--tv-gap);
+}
+.tv-marker {
+  --tv-kind: var(--tv-warn);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 4px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--tv-panel) 94%, transparent);
+  border: 1px solid var(--tv-kind);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.4);
+  opacity: 0;
+  animation: tv-marker 1.9s ease-out both;
+}
+.tv-marker[data-kind='hit'] {
+  --tv-kind: var(--tv-ok);
+}
+.tv-marker[data-kind='error'] {
+  --tv-kind: var(--tv-bad);
+}
+.tv-marker-glyph {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--tv-kind);
+  color: var(--tv-surface);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1;
+}
+.tv-marker-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1;
+}
+.tv-marker-text b {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--tv-ink);
+}
+.tv-marker-text i {
+  font-size: 9px;
+  font-style: normal;
+  color: var(--tv-kind);
+}
+
+/* HUD phase dot */
+.tv-phase-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tv-ink-dim);
+}
+.tv-root[data-phase='thinking'] .tv-phase-dot {
+  background: var(--tv-warn);
+  animation: tv-blink 0.9s ease-in-out infinite;
+}
+.tv-root[data-phase='moving'] .tv-phase-dot {
+  background: var(--tv-ok);
+}
+.tv-root[data-phase='crashed'] .tv-phase-dot {
+  background: var(--tv-bad);
+  animation: tv-blink 0.4s ease-in-out infinite;
+}
+.tv-root[data-phase='spinning'] .tv-phase-dot {
+  background: var(--tv-warn);
+  animation: tv-blink 0.4s ease-in-out infinite;
+}
+.tv-root[data-phase='finished'] .tv-phase-dot {
+  background: var(--tv-info);
+}
+
+/* ───────────── Keyframes ───────────── */
+
+@keyframes tv-ring {
+  from {
+    transform: scale(0.75);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+@keyframes tv-glow {
+  from {
+    opacity: 0.15;
+  }
+  to {
+    opacity: 0.5;
+  }
+}
+@keyframes tv-damage {
+  from {
+    opacity: 0.1;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+@keyframes tv-finish {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes tv-smoke {
+  from {
+    transform: scale(0.4);
+    opacity: 0.45;
+  }
+  to {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+@keyframes tv-burst {
+  0% {
+    transform: scale(0.2) rotate(0deg);
+    opacity: 1;
+  }
+  60% {
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1.5) rotate(25deg);
+    opacity: 0;
+  }
+}
+@keyframes tv-skid {
+  0% {
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.9;
+  }
+  65% {
+    opacity: 0.7;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes tv-oil-in {
+  from {
+    transform: scale(0.35);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes tv-cones-in {
+  from {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes tv-flash {
+  0% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes tv-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes tv-dot {
+  0%,
+  70%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  35% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
+}
+@keyframes tv-blink {
+  50% {
+    opacity: 0.35;
+  }
+}
+@keyframes tv-marker {
+  0% {
+    opacity: 0;
+    transform: translateY(6px) scale(0.6);
+  }
+  12% {
+    opacity: 1;
+    transform: translateY(0) scale(1.12);
+  }
+  22% {
+    transform: translateY(0) scale(1);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(-6px) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-16px) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tv-root *:not(.tv-marker) {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
